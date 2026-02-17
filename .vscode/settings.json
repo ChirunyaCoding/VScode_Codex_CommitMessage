@@ -1,1 +1,9 @@
-{}
+{
+  "workbench.view.alwaysShowHeaderActions": false,
+  "scm.alwaysShowActions": false,
+  "git.showActionButton": {
+    "commit": false,
+    "publish": false,
+    "sync": false
+  }
+}

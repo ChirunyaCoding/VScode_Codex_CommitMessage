@@ -2,7 +2,7 @@
   "name": "codex-commit-push",
   "displayName": "Codex Commit Push",
   "description": "Generate commit messages with local Codex CLI and auto-push only generated commits.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -22,19 +22,12 @@
     "commands": [
       {
         "command": "codexCommitPush.generateCommitMessage",
-        "title": "commitMessage生成",
+        "title": "GenerateCommitMessage",
         "category": "Codex Commit Push",
         "icon": "$(wand)"
       }
     ],
     "menus": {
-      "scm/title": [
-        {
-          "command": "codexCommitPush.generateCommitMessage",
-          "when": "scmProvider == git",
-          "group": "navigation@0"
-        }
-      ],
       "scm/inputBox": [
         {
           "command": "codexCommitPush.generateCommitMessage",
