@@ -1,11 +1,11 @@
 # Codex Commit Push
 
-VS Code拡張です。SCM入力欄右側の `commitMessage生成` ボタンで、ローカル `codex` CLI によるコミットメッセージ生成を行います。  
+VS Code拡張です。ソース管理ツールバーの `commitMessage生成` ボタンで、ローカル `codex` CLI によるコミットメッセージ生成を行います。  
 さらに、**この拡張で生成したメッセージでコミット成功した場合のみ** 自動で push を実行します。
 
 ## Features
 
-- `scm/inputBox` に `commitMessage生成` ボタンを追加
+- `scm/title`（ソース管理ツールバー）に `commitMessage生成` ボタンを追加
 - `codex exec --json` で日本語1行コミットメッセージを生成
 - 既定で、生成後に自動コミットを実行
 - 生成メッセージと最新コミットの1行目が一致した場合のみ自動 push
@@ -14,23 +14,9 @@ VS Code拡張です。SCM入力欄右側の `commitMessage生成` ボタンで�
 
 ## Requirements
 
-- VS Code Insiders
+- VS Code
 - ローカル `codex` CLI がインストール済みでログイン済み
 - Git が利用可能
-
-## Important: Proposed API
-
-この拡張は `scm/inputBox` を使うため Proposed API を利用します。
-
-- Marketplace への通常公開は不可
-- VSIX 配布前提
-- 起動時に `--enable-proposed-api=<extension-id>` が必要
-
-例:
-
-```bash
-code-insiders . --enable-proposed-api=local.codex-commit-push
-```
 
 ## Settings
 
