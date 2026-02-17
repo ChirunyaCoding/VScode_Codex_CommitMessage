@@ -1,0 +1,107 @@
+{
+  "name": "codex-commit-push",
+  "displayName": "Codex Commit Push",
+  "description": "Generate commit messages with local Codex CLI and auto-push only generated commits.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Source Control"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:codexCommitPush.generateCommitMessage"
+  ],
+  "enabledApiProposals": [
+    "contribSourceControlInputBoxMenu"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexCommitPush.generateCommitMessage",
+        "title": "commitMessage生成",
+        "category": "Codex Commit Push"
+      }
+    ],
+    "menus": {
+      "scm/inputBox": [
+        {
+          "command": "codexCommitPush.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "inline@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codexCommitPush.generateCommitMessage"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Codex Commit Push",
+      "properties": {
+        "codexCommitPush.model": {
+          "type": "string",
+          "default": "gpt-5.3-codex",
+          "description": "Model name passed to `codex exec -m`."
+        },
+        "codexCommitPush.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "high",
+          "description": "Reasoning effort mapped to `-c model_reasoning_effort=\"...\"`."
+        },
+        "codexCommitPush.includeUntracked": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include untracked files in the prompt context."
+        },
+        "codexCommitPush.diffMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "description": "Maximum characters of diff text sent to Codex."
+        },
+        "codexCommitPush.timeoutSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 10,
+          "description": "Timeout for one Codex generation run in seconds."
+        },
+        "codexCommitPush.codexCommandPath": {
+          "type": "string",
+          "default": "codex",
+          "description": "Codex CLI command path."
+        },
+        "codexCommitPush.pushRemote": {
+          "type": "string",
+          "default": "origin",
+          "description": "Remote name used for auto-push."
+        },
+        "codexCommitPush.pushBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Branch name required for auto-push and used as push target."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/vscode": "^1.109.0",
+    "typescript": "^5.9.2"
+  }
+}
