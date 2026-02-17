@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { CodexCliError, ReasoningEffort, generateCommitMessageWithCodex } from './codexCli';
 import { collectDiffForPrompt } from './diffCollector';
 import { GitAPI, GitRepository, getGitApi, repositoryKey, resolveRepository } from './gitApi';
@@ -8,6 +10,7 @@ import { PendingCommitState } from './state';
 const COMMAND_ID = 'codexCommitPush.generateCommitMessage';
 const CONFIG_NAMESPACE = 'codexCommitPush';
 const OUTPUT_CHANNEL_NAME = 'Codex Commit Push';
+const execFileAsync = promisify(execFile);
 
 interface ExtensionSettings {
   model: string;
@@ -16,6 +19,7 @@ interface ExtensionSettings {
   diffMaxChars: number;
   timeoutSeconds: number;
   codexCommandPath: string;
+  autoCommitAfterGenerate: boolean;
   pushRemote: string;
   pushBranch: string;
 }
@@ -26,6 +30,21 @@ function toErrorMessage(error: unknown): string {
   }
 
   return String(error);
+}
+
+function toErrorDetails(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const props = Object.getOwnPropertyNames(error);
+  const shaped: Record<string, unknown> = {};
+  const errorRecord = error as unknown as Record<string, unknown>;
+  for (const prop of props) {
+    shaped[prop] = errorRecord[prop];
+  }
+
+  return JSON.stringify(shaped, null, 2);
 }
 
 function getSettings(): ExtensionSettings {
@@ -42,6 +61,7 @@ function getSettings(): ExtensionSettings {
   const diffMaxChars = Math.max(1000, config.get<number>('diffMaxChars', 12000));
   const timeoutSeconds = Math.max(10, config.get<number>('timeoutSeconds', 90));
   const codexCommandPath = config.get<string>('codexCommandPath', 'codex');
+  const autoCommitAfterGenerate = config.get<boolean>('autoCommitAfterGenerate', true);
   const pushRemote = config.get<string>('pushRemote', 'origin');
   const pushBranch = config.get<string>('pushBranch', 'main');
 
@@ -52,6 +72,7 @@ function getSettings(): ExtensionSettings {
     diffMaxChars,
     timeoutSeconds,
     codexCommandPath,
+    autoCommitAfterGenerate,
     pushRemote,
     pushBranch
   };
@@ -64,10 +85,10 @@ function firstLine(text: string): string {
 function registerCommitListeners(
   api: GitAPI,
   pendingState: PendingCommitState,
-  output: vscode.OutputChannel
+  output: vscode.OutputChannel,
+  pushInFlight: Set<string>
 ): vscode.Disposable {
   const repositoryDisposables = new Map<string, vscode.Disposable>();
-  const pushInFlight = new Set<string>();
 
   const registerRepository = (repository: GitRepository): void => {
     const key = repositoryKey(repository);
@@ -76,7 +97,7 @@ function registerCommitListeners(
     }
 
     const disposable = repository.onDidCommit(() => {
-      void handleCommitEvent(repository, pendingState, output, pushInFlight);
+      void handleCommitEvent(repository, pendingState, output, pushInFlight, false);
     });
 
     repositoryDisposables.set(key, disposable);
@@ -122,7 +143,8 @@ async function handleCommitEvent(
   repository: GitRepository,
   pendingState: PendingCommitState,
   output: vscode.OutputChannel,
-  pushInFlight: Set<string>
+  pushInFlight: Set<string>,
+  showSkipNotification: boolean
 ): Promise<void> {
   const pending = pendingState.get(repository);
   if (!pending) {
@@ -137,26 +159,44 @@ async function handleCommitEvent(
   pushInFlight.add(key);
   try {
     const settings = getSettings();
-    const head = repository.state.HEAD;
-    if (!head?.commit) {
-      output.appendLine('[push] HEAD commit hash is unavailable. Auto-push skipped.');
-      return;
+    let latestCommit;
+    try {
+      latestCommit = await repository.getCommit('HEAD');
+    } catch {
+      const headCommit = repository.state.HEAD?.commit;
+      if (!headCommit) {
+        output.appendLine('[push] HEAD commit hash is unavailable. Auto-push skipped.');
+        if (showSkipNotification) {
+          vscode.window.showWarningMessage('最新コミットを取得できず、自動pushをスキップしました。');
+        }
+
+        return;
+      }
+
+      latestCommit = await repository.getCommit(headCommit);
     }
 
-    const latestCommit = await repository.getCommit(head.commit);
     const latestMessage = firstLine(latestCommit.message);
     if (latestMessage !== pending.message.trim()) {
       output.appendLine(
         `[push] Latest commit message does not match generated message. Skipping auto-push.\n  latest: ${latestMessage}\n  generated: ${pending.message}`
       );
+      if (showSkipNotification) {
+        vscode.window.showInformationMessage('生成メッセージと一致しないため、自動pushをスキップしました。');
+      }
+
       return;
     }
 
-    const currentBranchName = head.name ?? '';
+    const head = repository.state.HEAD;
+    const currentBranchName = head?.name ?? '';
     if (currentBranchName !== settings.pushBranch) {
-      vscode.window.showInformationMessage(
-        `自動pushをスキップしました。現在ブランチは "${currentBranchName || 'unknown'}" で、対象は "${settings.pushBranch}" です。`
-      );
+      if (showSkipNotification) {
+        vscode.window.showInformationMessage(
+          `自動pushをスキップしました。現在ブランチは "${currentBranchName || 'unknown'}" で、対象は "${settings.pushBranch}" です。`
+        );
+      }
+
       output.appendLine(
         `[push] Branch mismatch. current=${currentBranchName || 'unknown'} target=${settings.pushBranch}`
       );
@@ -187,10 +227,25 @@ async function handleCommitEvent(
   }
 }
 
+function isNoChangesCommitError(message: string): boolean {
+  return /nothing to commit|no changes added|working tree clean|empty commit message/i.test(message);
+}
+
+async function stageAllChangesWithGitCli(repositoryPath: string, output: vscode.OutputChannel): Promise<void> {
+  output.appendLine(`[commit] Staging changes with git CLI: git -C "${repositoryPath}" add -A -- .`);
+  await execFileAsync('git', ['-C', repositoryPath, 'add', '-A', '--', '.'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024
+  });
+}
+
 async function handleGenerateCommand(
   api: GitAPI,
   pendingState: PendingCommitState,
   output: vscode.OutputChannel,
+  pushInFlight: Set<string>,
   contextArg: unknown
 ): Promise<void> {
   const repository = await resolveRepository(api, contextArg);
@@ -254,11 +309,41 @@ async function handleGenerateCommand(
       createdAt: Date.now()
     });
 
-    vscode.window.showInformationMessage(
-      `commitMessageを入力しました。コミット成功時に ${settings.pushRemote}/${settings.pushBranch} へ自動pushします。`
-    );
     output.appendLine(`[generate] Generated message: ${message}`);
+
+    if (!settings.autoCommitAfterGenerate) {
+      vscode.window.showInformationMessage(
+        `commitMessageを入力しました（autoCommitAfterGenerate=false）。コミット成功時に ${settings.pushRemote}/${settings.pushBranch} へ自動pushします。`
+      );
+      return;
+    }
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'コミットして自動push中...',
+        cancellable: false
+      },
+      async () => {
+        output.appendLine('[commit] Auto-commit started.');
+        await stageAllChangesWithGitCli(repository.rootUri.fsPath, output);
+        await repository.commit(message, { postCommitCommand: null });
+        output.appendLine('[commit] Auto-commit completed.');
+      }
+    );
+
+    await handleCommitEvent(repository, pendingState, output, pushInFlight, true);
   } catch (error) {
+    pendingState.clear(repository);
+
+    const errorMessage = toErrorMessage(error);
+    output.appendLine(`[error][details] ${toErrorDetails(error)}`);
+    if (isNoChangesCommitError(errorMessage)) {
+      vscode.window.showWarningMessage('コミット対象の変更がないため、自動コミットをスキップしました。');
+      output.appendLine(`[commit] Auto-commit skipped: ${errorMessage}`);
+      return;
+    }
+
     if (error instanceof CodexCliError) {
       switch (error.code) {
         case 'not-found':
@@ -290,9 +375,8 @@ async function handleGenerateCommand(
       return;
     }
 
-    const message = toErrorMessage(error);
-    output.appendLine(`[generate] Unexpected error: ${message}`);
-    vscode.window.showErrorMessage(`commitMessage生成に失敗しました: ${message}`);
+    output.appendLine(`[generate] Unexpected error: ${errorMessage}`);
+    vscode.window.showErrorMessage(`commitMessage生成または自動コミットに失敗しました: ${errorMessage}`);
   }
 }
 
@@ -311,10 +395,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   const pendingState = new PendingCommitState();
-  context.subscriptions.push(registerCommitListeners(api, pendingState, output));
+  const pushInFlight = new Set<string>();
+  context.subscriptions.push(registerCommitListeners(api, pendingState, output, pushInFlight));
 
   const generateCommand = vscode.commands.registerCommand(COMMAND_ID, async (contextArg: unknown) => {
-    await handleGenerateCommand(api, pendingState, output, contextArg);
+    await handleGenerateCommand(api, pendingState, output, pushInFlight, contextArg);
   });
   context.subscriptions.push(generateCommand);
 

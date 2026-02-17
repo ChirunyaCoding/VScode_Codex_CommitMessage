@@ -11,12 +11,26 @@ export interface GitCommit {
   readonly message: string;
 }
 
+export interface GitCommitOptions {
+  all?: boolean | 'tracked';
+  amend?: boolean;
+  signoff?: boolean;
+  signCommit?: boolean;
+  empty?: boolean;
+  noVerify?: boolean;
+  requireUserConfig?: boolean;
+  useEditor?: boolean;
+  verbose?: boolean;
+  postCommitCommand?: string | null;
+}
+
 export interface GitRepository {
   readonly rootUri: vscode.Uri;
   readonly inputBox: { value: string };
   readonly state: { readonly HEAD: GitBranch | undefined };
   readonly ui: { readonly selected: boolean };
   readonly onDidCommit: vscode.Event<void>;
+  commit(message: string, opts?: GitCommitOptions): Promise<void>;
   push(remoteName?: string, branchName?: string, setUpstream?: boolean): Promise<void>;
   getCommit(ref: string): Promise<GitCommit>;
 }
@@ -47,6 +61,7 @@ function isRepository(value: unknown): value is GitRepository {
 
   const candidate = value as Partial<GitRepository>;
   return (
+    typeof candidate.commit === 'function' &&
     typeof candidate.push === 'function' &&
     typeof candidate.getCommit === 'function' &&
     typeof candidate.onDidCommit === 'function' &&

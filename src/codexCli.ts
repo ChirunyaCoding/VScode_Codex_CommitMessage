@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 
@@ -39,6 +41,106 @@ interface CodexJsonEvent {
   };
 }
 
+function toErrno(error: unknown): NodeJS.ErrnoException {
+  return error as NodeJS.ErrnoException;
+}
+
+function isNotFoundLikeSpawnError(error: unknown): boolean {
+  const errnoError = toErrno(error);
+  return errnoError.code === 'ENOENT' || errnoError.code === 'EINVAL';
+}
+
+function uniqueCommandPaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  for (const commandPath of paths) {
+    const normalized = process.platform === 'win32' ? commandPath.toLowerCase() : commandPath;
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    results.push(commandPath);
+  }
+
+  return results;
+}
+
+function getBundledWindowsCodexCandidates(): string[] {
+  const userProfile = process.env.USERPROFILE;
+  if (!userProfile) {
+    return [];
+  }
+
+  const extensionRoots = [
+    path.join(userProfile, '.vscode', 'extensions'),
+    path.join(userProfile, '.vscode-insiders', 'extensions')
+  ];
+
+  const candidates: string[] = [];
+  for (const root of extensionRoots) {
+    if (!fs.existsSync(root)) {
+      continue;
+    }
+
+    let directories: fs.Dirent[];
+    try {
+      directories = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const directory of directories) {
+      if (!directory.isDirectory()) {
+        continue;
+      }
+
+      if (!directory.name.startsWith('openai.chatgpt-')) {
+        continue;
+      }
+
+      candidates.push(path.join(root, directory.name, 'bin', 'windows-x86_64', 'codex.exe'));
+    }
+  }
+
+  return candidates;
+}
+
+function buildCommandCandidates(configuredCommandPath: string): string[] {
+  const commandPath = configuredCommandPath.trim();
+  const candidates: string[] = [commandPath];
+
+  if (process.platform === 'win32') {
+    if (/\.(cmd|bat|ps1)$/i.test(commandPath)) {
+      candidates.push(commandPath.replace(/\.(cmd|bat|ps1)$/i, ''));
+      candidates.push(commandPath.replace(/\.(cmd|bat|ps1)$/i, '.exe'));
+    }
+
+    const appData = process.env.APPDATA;
+    if (appData) {
+      candidates.push(path.join(appData, 'npm', 'codex'));
+      candidates.push(path.join(appData, 'npm', 'codex.exe'));
+    }
+
+    candidates.push(...getBundledWindowsCodexCandidates());
+  }
+
+  const filtered = candidates.filter((candidate) => {
+    if (!candidate) {
+      return false;
+    }
+
+    if (!path.isAbsolute(candidate)) {
+      return true;
+    }
+
+    return fs.existsSync(candidate);
+  });
+
+  return uniqueCommandPaths(filtered);
+}
+
 function tail(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
@@ -65,7 +167,10 @@ function isModelAccessError(text: string): boolean {
   );
 }
 
-export async function generateCommitMessageWithCodex(options: CodexGenerateOptions): Promise<string> {
+async function runCodexWithCommand(
+  commandPath: string,
+  options: CodexGenerateOptions
+): Promise<string> {
   const args = [
     'exec',
     '--json',
@@ -77,7 +182,7 @@ export async function generateCommitMessageWithCodex(options: CodexGenerateOptio
   ];
 
   options.output.appendLine(
-    `[codex] Running: ${options.commandPath} exec --json -m ${options.model} -c model_reasoning_effort="${options.reasoningEffort}" <prompt>`
+    `[codex] Running: ${commandPath} exec --json -m ${options.model} -c model_reasoning_effort="${options.reasoningEffort}" <prompt>`
   );
 
   return new Promise<string>((resolve, reject) => {
@@ -88,11 +193,28 @@ export async function generateCommitMessageWithCodex(options: CodexGenerateOptio
     let timedOut = false;
     let settled = false;
 
-    const child = spawn(options.commandPath, args, {
-      cwd: options.cwd,
-      windowsHide: true,
-      shell: false
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(commandPath, args, {
+        cwd: options.cwd,
+        windowsHide: true,
+        shell: false
+      });
+    } catch (error) {
+      if (isNotFoundLikeSpawnError(error)) {
+        reject(
+          new CodexCliError(
+            'not-found',
+            `Codex CLI was not found or not executable at "${commandPath}".`,
+            toErrno(error).message
+          )
+        );
+        return;
+      }
+
+      reject(new CodexCliError('process-failed', `Failed to launch Codex CLI: ${toErrno(error).message}`));
+      return;
+    }
 
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
@@ -140,18 +262,18 @@ export async function generateCommitMessageWithCodex(options: CodexGenerateOptio
       }
     };
 
-    child.stdout.on('data', (data: Buffer) => {
+    child.stdout?.on('data', (data: Buffer) => {
       processStdoutLines(data.toString('utf8'));
     });
 
-    child.stderr.on('data', (data: Buffer) => {
+    child.stderr?.on('data', (data: Buffer) => {
       stderrRaw += data.toString('utf8');
     });
 
     child.on('error', (error) => {
       settle(() => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          reject(new CodexCliError('not-found', `Codex CLI was not found at "${options.commandPath}".`));
+        if (isNotFoundLikeSpawnError(error)) {
+          reject(new CodexCliError('not-found', `Codex CLI was not found at "${commandPath}".`));
           return;
         }
 
@@ -216,4 +338,33 @@ export async function generateCommitMessageWithCodex(options: CodexGenerateOptio
       });
     });
   });
+}
+
+export async function generateCommitMessageWithCodex(options: CodexGenerateOptions): Promise<string> {
+  const commandCandidates = buildCommandCandidates(options.commandPath);
+  let lastNotFoundError: CodexCliError | undefined;
+
+  for (const commandPath of commandCandidates) {
+    try {
+      return await runCodexWithCommand(commandPath, options);
+    } catch (error) {
+      if (error instanceof CodexCliError && error.code === 'not-found') {
+        lastNotFoundError = error;
+        options.output.appendLine(`[codex] Candidate not available: ${commandPath}`);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  if (lastNotFoundError) {
+    throw lastNotFoundError;
+  }
+
+  throw new CodexCliError(
+    'not-found',
+    `Codex CLI was not found at "${options.commandPath}".`,
+    'No executable candidate could be resolved.'
+  );
 }
